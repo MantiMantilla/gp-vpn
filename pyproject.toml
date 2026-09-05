@@ -1,0 +1,9 @@
+[project]
+name = "gp-vpn"
+version = "0.1.0"
+description = "Connect to a GlobalProtect VPN on macOS by reusing your live Chrome Okta session"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography",
+    "playwright",
+]

@@ -1,0 +1,5 @@
+auth.json
+stall.png
+.venv/
+__pycache__/
+*.pyc

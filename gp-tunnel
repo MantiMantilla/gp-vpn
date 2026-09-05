@@ -1,0 +1,32 @@
+#!/bin/bash
+# Root-owned GlobalProtect tunnel helper. Installed to /usr/local/sbin/gp-tunnel
+# and run via a scoped NOPASSWD sudoers rule. All privileged/exec-relevant values
+# are HARDCODED here (root-owned, not user-writable). The only inputs are the
+# username and cookie, read from stdin as data and passed to openconnect.
+#
+#   stdin line 1: GlobalProtect username
+#   stdin line 2: gateway prelogin-cookie
+set -euo pipefail
+
+OPENCONNECT="/opt/homebrew/bin/openconnect"
+VPNC_SCRIPT="/usr/local/sbin/gp-vpnc-script"   # root-owned copy
+SERVER="__GP_SERVER__"   # baked in by install-privileged.sh at install time
+
+read -r GP_USER || true
+read -r GP_COOKIE || true
+: "${GP_USER:?expected username on stdin line 1}"
+: "${GP_COOKIE:?expected cookie on stdin line 2}"
+
+SCRIPT_ARG=()
+[ -x "$VPNC_SCRIPT" ] && SCRIPT_ARG+=(--script="$VPNC_SCRIPT")
+
+HIP="/usr/local/sbin/gp-hipreport.sh"
+[ -x "$HIP" ] && SCRIPT_ARG+=(--csd-wrapper="$HIP")
+
+printf '%s\n' "$GP_COOKIE" | exec "$OPENCONNECT" \
+  --protocol=gp \
+  --user="$GP_USER" \
+  --usergroup=gateway:prelogin-cookie \
+  --passwd-on-stdin \
+  "${SCRIPT_ARG[@]}" \
+  "$SERVER"
