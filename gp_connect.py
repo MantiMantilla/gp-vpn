@@ -7,8 +7,13 @@ browser, drives the GP SAML form, and captures the prelogin-cookie that
 GlobalProtect returns. No separate VPN login — it rides on your normal Okta
 session.
 
-  python gp_connect.py <portal-host> [--headed] [--gateway]
+  python gp_connect.py <portal-host> [--headed] [--gateway] [--client-os=Mac]
   GP_COOKIE_DOMAINS=example.com,example.net python gp_connect.py vpn.example.com
+
+--client-os selects the OS reported to the portal/gateway at prelogin time.
+It must match the OS of the machine that will run openconnect with the
+resulting cookie, so a cookie destined for a remote Linux box needs
+--client-os=Linux.
 
 Writes captured values to auth.json.
 """
@@ -19,9 +24,16 @@ from cryptography.hazmat.backends import default_backend
 SERVER = os.environ.get("GP_SERVER", "vpn.example.com")
 HEADED = "--headed" in sys.argv
 GATEWAY = "--gateway" in sys.argv
+# GlobalProtect issues the cookie for a specific client OS, so a cookie that
+# will be redeemed by openconnect on a Linux host must be requested as Linux.
+CLIENT_OS = os.environ.get("GP_CLIENT_OS", "Mac")
 for a in sys.argv[1:]:
-    if not a.startswith("-"):
+    if a.startswith("--client-os="):
+        CLIENT_OS = a.split("=", 1)[1]
+    elif not a.startswith("-"):
         SERVER = a
+if CLIENT_OS not in ("Mac", "Linux", "Windows"):
+    raise SystemExit(f"--client-os must be Mac, Linux or Windows (got {CLIENT_OS!r})")
 # portal SAML lives at /global-protect/prelogin.esp; gateway SAML at /ssl-vpn/prelogin.esp
 PRELOGIN_PATH = "/ssl-vpn/prelogin.esp" if GATEWAY else "/global-protect/prelogin.esp"
 
@@ -40,7 +52,7 @@ def wanted(host):
     return host.endswith("okta.com") or any(host.endswith(d) for d in _extra_domains)
 
 def get_saml_request(server):
-    url = f"https://{server}{PRELOGIN_PATH}?tmp=tmp&clientVer=4100&clientos=Mac"
+    url = f"https://{server}{PRELOGIN_PATH}?tmp=tmp&clientVer=4100&clientos={CLIENT_OS}"
     req = urllib.request.Request(url, data=b"", headers={"User-Agent": "PAN GlobalProtect"})
     with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=20) as r:
         body = r.read().decode("utf-8", "replace")
@@ -100,7 +112,7 @@ def load_cookies():
 
 def main():
     saml_html = get_saml_request(SERVER)
-    print(f"[*] prelogin OK  form-bytes={len(saml_html)}", flush=True)
+    print(f"[*] prelogin OK  clientos={CLIENT_OS}  form-bytes={len(saml_html)}", flush=True)
     cookies = load_cookies()
     okta = [c for c in cookies if "okta" in c["domain"]]
     print(f"[*] decrypted {len(cookies)} cookies ({len(okta)} okta) from live profile", flush=True)
@@ -155,7 +167,8 @@ def main():
                 print("[dbg] snapshot err:", e, flush=True)
         ctx.close(); browser.close()
 
-    OUT.write_text(json.dumps({"server": SERVER, "captured": captured}, indent=2))
+    OUT.write_text(json.dumps({"server": SERVER, "client-os": CLIENT_OS,
+                               "captured": captured}, indent=2))
     if "prelogin-cookie" not in captured and "portal-userauthcookie" not in captured:
         print("[!] No prelogin-cookie captured. Captured:", list(captured)); raise SystemExit(2)
     print("[*] SUCCESS. Wrote", OUT)

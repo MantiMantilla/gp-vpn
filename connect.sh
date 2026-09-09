@@ -14,7 +14,7 @@ cd "$DIR"
 # Never leave the captured cookie on disk: remove it whenever this script exits
 # (clean disconnect, Ctrl+C, or capture failure). The cookie is held in shell
 # variables for the tunnel, so the file isn't needed after it's read.
-trap 'rm -f "$DIR/auth.json"' EXIT
+trap 'rm -f "$DIR/auth.json"' EXIT INT TERM HUP
 
 echo "[*] Capturing GlobalProtect gateway cookie via your Chrome Okta session..."
 uv run gp_connect.py "$SERVER" --gateway

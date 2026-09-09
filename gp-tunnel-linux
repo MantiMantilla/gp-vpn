@@ -1,0 +1,150 @@
+#!/bin/bash
+# Root-owned GlobalProtect tunnel helper for Linux. Installed to
+# /usr/local/sbin/gp-tunnel and run via a scoped NOPASSWD sudoers rule, the
+# Linux counterpart of the macOS `gp-tunnel`. All privileged/exec-relevant
+# values are HARDCODED here or baked in at install time (root-owned, not
+# user-writable). The only runtime inputs are read from stdin as data:
+#
+#   stdin line 1: GlobalProtect username
+#   stdin line 2: gateway prelogin-cookie
+#   stdin line 3: (optional) address of the SSH client that started us, pinned
+#                 to the pre-VPN route so bringing the tunnel up over SSH does
+#                 not cut the very session that brought it up.
+#
+# In foreground mode stdin is then held open by the client for the life of the
+# session: EOF on it means the SSH channel died, which is the only reliable
+# notice we get (a non-tty ssh session gets no SIGHUP when the client vanishes).
+#
+# One optional argument, exactly one of:
+#   foreground  (default) run the tunnel until killed
+#   background  daemonize openconnect and return
+#   stop        tear down a backgrounded tunnel (needs no stdin)
+set -euo pipefail
+
+OPENCONNECT="__OPENCONNECT__"                  # baked in by install-privileged-linux.sh
+SERVER="__GP_SERVER__"                         # baked in by install-privileged-linux.sh
+VPNC_SCRIPT="/usr/local/sbin/gp-vpnc-script"   # root-owned copy
+HIP="/usr/local/sbin/gp-hipreport.sh"
+PID_FILE="/run/gp-tunnel.pid"
+ROUTE_FILE="/run/gp-tunnel.route"
+
+[ $# -le 1 ] || { echo "gp-tunnel takes at most one argument" >&2; exit 64; }
+MODE="${1:-foreground}"
+case "$MODE" in
+  foreground|background|stop) ;;
+  *) echo "usage: gp-tunnel [foreground|background|stop]" >&2; exit 64 ;;
+esac
+
+# --- SSH route pinning ------------------------------------------------------
+# The gateway usually pushes a default route. Without this, the SSH connection
+# that is feeding us the cookie gets black-holed the instant the tunnel comes
+# up. Pin the path to the SSH client as it is *now*, before openconnect runs.
+
+unpin_ssh_route() {
+  [ -s "$ROUTE_FILE" ] || { rm -f "$ROUTE_FILE"; return 0; }
+  local pinned
+  pinned=$(cat "$ROUTE_FILE")
+  rm -f "$ROUTE_FILE"
+  ip route del "$pinned" >/dev/null 2>&1 || true
+}
+
+pin_ssh_route() {
+  local peer="$1" fam plen line gw dev
+  # This value reaches `ip route`, so accept only a bare IPv4/IPv6 literal.
+  case "$peer" in
+    *:*) fam=-6; plen=128
+         printf '%s' "$peer" | grep -Eq '^[0-9A-Fa-f:]{2,45}$' || peer="" ;;
+    *)   fam=-4; plen=32
+         printf '%s' "$peer" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || peer="" ;;
+  esac
+  [ -n "$peer" ] || { echo "[!] ignoring malformed SSH client address" >&2; return 0; }
+
+  line=$(ip "$fam" route get "$peer" 2>/dev/null | head -1) || return 0
+  dev=$(printf '%s' "$line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+  gw=$(printf '%s' "$line" | sed -n 's/.* via \([^ ]*\).*/\1/p')
+  [ -n "$dev" ] || { echo "[!] no current route to $peer; not pinning" >&2; return 0; }
+
+  if [ -n "$gw" ]; then
+    ip "$fam" route replace "$peer/$plen" via "$gw" dev "$dev"
+  else
+    ip "$fam" route replace "$peer/$plen" dev "$dev"   # already on-link
+  fi
+  printf '%s/%s\n' "$peer" "$plen" > "$ROUTE_FILE"
+  echo "[*] pinned SSH client $peer to $dev${gw:+ via $gw} so this session survives the tunnel"
+}
+
+# --- stop -------------------------------------------------------------------
+if [ "$MODE" = stop ]; then
+  PID=""
+  [ -s "$PID_FILE" ] && PID=$(cat "$PID_FILE")
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    kill -TERM "$PID"
+    echo "[*] sent SIGTERM to openconnect (pid $PID)"
+  else
+    echo "[i] no running tunnel found"
+  fi
+  rm -f "$PID_FILE"
+  unpin_ssh_route
+  exit 0
+fi
+
+# --- connect ----------------------------------------------------------------
+# Two tunnels fighting over the default route on one box helps nobody.
+if pgrep -x openconnect >/dev/null 2>&1; then
+  echo "[!] openconnect is already running on this host; refusing to stack a" >&2
+  echo "    second tunnel. Tear the current one down first: gp-tunnel stop" >&2
+  exit 75
+fi
+
+read -r GP_USER || true
+read -r GP_COOKIE || true
+read -r SSH_PEER || true
+: "${GP_USER:?expected username on stdin line 1}"
+: "${GP_COOKIE:?expected cookie on stdin line 2}"
+
+OC_ARGS=(--protocol=gp --user="$GP_USER" --usergroup=gateway:prelogin-cookie
+         --passwd-on-stdin --os=linux)
+[ -x "$VPNC_SCRIPT" ] && OC_ARGS+=(--script="$VPNC_SCRIPT")
+[ -x "$HIP" ] && OC_ARGS+=(--csd-wrapper="$HIP")
+[ "$MODE" = background ] && OC_ARGS+=(--background --pid-file="$PID_FILE")
+
+[ -n "${SSH_PEER:-}" ] && pin_ssh_route "$SSH_PEER"
+
+if [ "$MODE" = background ]; then
+  printf '%s\n' "$GP_COOKIE" | "$OPENCONNECT" "${OC_ARGS[@]}" "$SERVER"
+  echo "[✓] tunnel running in background (pid $(cat "$PID_FILE" 2>/dev/null || echo '?'))"
+  echo "    stop it with: gp-tunnel stop"
+  exit 0
+fi
+
+# Foreground. Two things conspire to strand an orphaned tunnel here: a non-tty
+# SSH session gets no SIGHUP when the client disappears, and openconnect reads
+# the SIGHUP it would get as "detach and keep running". So don't rely on
+# signals — watch our stdin, which the client holds open for exactly as long as
+# the session lives, and turn its EOF into the SIGTERM that really disconnects.
+OC_PID=""
+shutdown_tunnel() {
+  [ -n "$OC_PID" ] && kill -0 "$OC_PID" 2>/dev/null && kill -TERM "$OC_PID" 2>/dev/null
+  return 0
+}
+trap shutdown_tunnel INT TERM HUP
+trap 'shutdown_tunnel; rm -f "$PID_FILE"; unpin_ssh_route' EXIT
+
+# Cookie goes in over /dev/fd, never a temp file, and keeps openconnect a
+# direct child so $! is its real pid.
+"$OPENCONNECT" "${OC_ARGS[@]}" "$SERVER" < <(printf '%s\n' "$GP_COOKIE") &
+OC_PID=$!
+echo "$OC_PID" > "$PID_FILE"    # so `gp-tunnel stop` works in this mode too
+
+# Stash the SSH channel on fd 8: a background job in a non-interactive shell
+# gets its stdin reassigned to /dev/null unless it is redirected explicitly,
+# which would make the watcher below see EOF instantly and kill the tunnel the
+# moment it came up. $OC_PID is inherited, so the subshell can do the teardown.
+exec 8<&0
+{ cat <&8 >/dev/null 2>&1 || true; shutdown_tunnel; } &
+WATCH_PID=$!
+
+wait "$OC_PID" || true          # interruptible: the traps above fire here
+wait "$OC_PID" 2>/dev/null || true   # reap if a trap cut the first wait short
+kill "$WATCH_PID" 2>/dev/null || true
+exit 0
