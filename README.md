@@ -31,11 +31,11 @@ stdin — see [Remote Linux hosts](#remote-linux-hosts) below.
 - macOS, with Chrome signed into your org's Okta (this is always the machine
   that captures the cookie, even when the tunnel runs elsewhere)
 - [`openconnect`](https://formulae.brew.sh/formula/openconnect) (`brew install openconnect`)
-- [`uv`](https://docs.astral.sh/uv/), plus a Playwright browser:
+- [`uv`](https://docs.astral.sh/uv/). Playwright drives your installed Google
+  Chrome (`channel="chrome"`), so no separate browser download is needed:
 
 ```bash
 uv sync
-uv run playwright install chromium
 ```
 
 ## Setup
