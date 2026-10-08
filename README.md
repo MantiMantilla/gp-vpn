@@ -40,32 +40,43 @@ uv run playwright install chromium
 
 ## Setup
 
-Set `GP_SERVER` to your GlobalProtect gateway hostname (e.g.
-`vpn.example.com`). Optionally set `GP_COOKIE_DOMAINS` (comma-separated) if
-your Okta-fronted domains differ from the gateway's own domain.
+List your GlobalProtect gateways in `GP_SERVERS`, comma-separated, each either
+a bare hostname or `name=hostname`. The first one is the default. (With only
+one gateway, `GP_SERVER=vpn.example.com` works too.) Optionally set
+`GP_COOKIE_DOMAINS` (comma-separated) if your Okta-fronted domains differ from
+the gateway's own domain.
 
 ```bash
-export GP_SERVER=vpn.example.com
+export GP_SERVERS="prod=vpn.example.com,fallback=vpn-fallback.example.com"
 ```
 
 To avoid a `sudo` password prompt on every connect, install the scoped
 root helper once:
 
 ```bash
-sudo GP_SERVER=$GP_SERVER ./install-privileged.sh
+sudo GP_SERVERS="$GP_SERVERS" ./install-privileged.sh
 ```
 
-This installs a root-owned `gp-tunnel` (with the server hostname baked in),
-a copy of `vpnc-script`, and a `sudoers.d` rule that lets your user run only
-that one helper without a password.
+This installs a root-owned `gp-tunnel` (with the gateway hostnames baked in as
+an allowlist), a copy of `vpnc-script`, and a `sudoers.d` rule that lets your
+user run only that one helper without a password. Re-run it whenever you add
+or remove a gateway.
 
 ## Usage
 
 ```bash
-GP_SERVER=vpn.example.com ./connect.sh
+./connect.sh             # connect to the default (first) gateway
+./connect.sh fallback    # connect to another one, by name or hostname
+./connect.sh --list      # show the configured gateways
+./connect.sh --stop      # disconnect, from any terminal
 ```
 
-Disconnect with Ctrl+C.
+Running `./connect.sh <other>` while a tunnel is up switches to it: the new
+gateway's cookie is captured first, and only then is the current tunnel taken
+down, so a failed capture leaves you connected where you were.
+
+Disconnect with Ctrl+C, or `--stop` (which needs no password with the helper
+installed).
 
 ## Remote Linux hosts
 
@@ -74,20 +85,22 @@ the one-time installer on that host (it needs `openconnect`, and the
 `vpnc-scripts` package for sane routing/DNS):
 
 ```bash
-GP_SERVER=vpn.example.com ./connect-remote.sh --install user@linux-host
+./connect-remote.sh --install user@linux-host
 ```
 
 That copies [`gp-tunnel-linux`](gp-tunnel-linux),
 [`install-privileged-linux.sh`](install-privileged-linux.sh) and the HIP script
 over, and installs the same root-owned-helper + scoped `NOPASSWD` sudoers
-arrangement used on the Mac. It asks for the remote sudo password once.
+arrangement used on the Mac, with the same `GP_SERVERS` allowlist. It asks for
+the remote sudo password once.
 
 Then connect:
 
 ```bash
-GP_SERVER=vpn.example.com ./connect-remote.sh user@linux-host        # Ctrl+C to disconnect
-GP_SERVER=vpn.example.com ./connect-remote.sh --background user@host  # detached
-GP_SERVER=vpn.example.com ./connect-remote.sh --stop user@host        # tear down
+./connect-remote.sh user@linux-host                  # Ctrl+C to disconnect
+./connect-remote.sh --server fallback user@host       # pick a gateway
+./connect-remote.sh --background user@host            # detached
+./connect-remote.sh --stop user@host                  # tear down
 ```
 
 Extra ssh flags go in `GP_SSH_OPTS`, e.g. `GP_SSH_OPTS="-p 2222 -i ~/key.pem"`.
@@ -117,8 +130,9 @@ a second openconnect over the first.
 ## Security notes
 
 - The privileged helper only ever takes a username and a short-lived SAML
-  cookie on stdin; the VPN server and all `openconnect` flags are hardcoded
-  in the root-owned copy, not user-controllable at run time. The Linux helper
+  cookie on stdin; all `openconnect` flags are hardcoded in the root-owned
+  copy, and the gateway can only be chosen from the allowlist baked in at
+  install time, not user-controllable beyond that. The Linux helper
   additionally accepts one literal mode word (`foreground`/`background`/`stop`)
   and validates the pinned SSH address as a bare IP literal before it reaches
   `ip route`.

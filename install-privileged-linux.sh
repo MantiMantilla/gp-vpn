@@ -3,10 +3,13 @@
 # SSH can bring the tunnel up with NO password prompt.
 #
 # Run once, on the Linux host:
-#   sudo GP_SERVER=vpn.example.com ./install-privileged-linux.sh
+#   sudo GP_SERVERS="prod=vpn.example.com,fallback=vpn-fallback.example.com" ./install-privileged-linux.sh
 #
 # Or, from your Mac, which copies these files over and runs it for you:
-#   GP_SERVER=vpn.example.com ./connect-remote.sh --install user@linux-host
+#   GP_SERVERS=... ./connect-remote.sh --install user@linux-host
+#
+# GP_SERVER=vpn.example.com works for a single gateway. Every listed gateway is
+# baked into the helper's allowlist; re-run this to add or remove one.
 #
 # Installs:
 #   /usr/local/sbin/gp-tunnel        root-owned tunnel helper (hardcoded flags)
@@ -17,13 +20,12 @@ set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "Please run with sudo: sudo $0" >&2; exit 1; }
 
-: "${GP_SERVER:?Set GP_SERVER to your VPN gateway hostname, e.g. sudo GP_SERVER=vpn.example.com $0}"
-case "$GP_SERVER" in
-  *[!A-Za-z0-9.-]*) echo "GP_SERVER must be a bare hostname" >&2; exit 1 ;;
-esac
-
 REAL_USER="${GP_TUNNEL_USER:-${SUDO_USER:-$(logname 2>/dev/null || echo root)}}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=gp-servers.sh
+. "$SRC/gp-servers.sh"
+HOSTS="$(gp_server_hosts)" || exit 1
 
 OC="$(command -v openconnect || true)"
 [ -n "$OC" ] && [ -x "$OC" ] || {
@@ -36,9 +38,9 @@ OC="$(command -v openconnect || true)"
 
 mkdir -p /usr/local/sbin
 
-echo "[*] Installing root-owned tunnel helper (server=$GP_SERVER, openconnect=$OC)..."
+echo "[*] Installing root-owned tunnel helper (gateways: $HOSTS, openconnect=$OC)..."
 TMP_HELPER="$(mktemp)"
-sed -e "s|__GP_SERVER__|$GP_SERVER|" -e "s|__OPENCONNECT__|$OC|" \
+sed -e "s|__GP_SERVERS__|$HOSTS|" -e "s|__OPENCONNECT__|$OC|" \
     "$SRC/gp-tunnel-linux" > "$TMP_HELPER"
 install -o root -g root -m 0755 "$TMP_HELPER" /usr/local/sbin/gp-tunnel
 rm -f "$TMP_HELPER"

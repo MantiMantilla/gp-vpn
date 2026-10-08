@@ -1,6 +1,9 @@
 #!/bin/bash
 # One-time privileged setup so future VPN connects need NO password.
-# Run once:   sudo GP_SERVER=vpn.example.com ~/gp-vpn/install-privileged.sh
+# Run once:
+#   sudo GP_SERVERS="prod=vpn.example.com,fallback=vpn-fallback.example.com" ./install-privileged.sh
+# (or GP_SERVER=vpn.example.com for a single gateway). Every listed gateway is
+# baked into the helper's allowlist; re-run this to add or remove one.
 #
 # Installs:
 #   /usr/local/sbin/gp-tunnel        root-owned tunnel helper (hardcoded flags)
@@ -10,10 +13,12 @@ set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "Please run with sudo: sudo $0" >&2; exit 1; }
 
-: "${GP_SERVER:?Set GP_SERVER to your VPN gateway hostname, e.g. sudo GP_SERVER=vpn.example.com $0}"
-
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=gp-servers.sh
+. "$SRC/gp-servers.sh"
+HOSTS="$(gp_server_hosts)" || exit 1
 VPNC_SRC="/opt/homebrew/etc/vpnc/vpnc-script"
 OC="/opt/homebrew/bin/openconnect"
 
@@ -22,8 +27,8 @@ OC="/opt/homebrew/bin/openconnect"
 
 mkdir -p /usr/local/sbin
 
-echo "[*] Installing root-owned tunnel helper (server=$GP_SERVER)..."
-sed "s/__GP_SERVER__/$GP_SERVER/" "$SRC/gp-tunnel" > "$SRC/.gp-tunnel.tmp"
+echo "[*] Installing root-owned tunnel helper (gateways: $HOSTS)..."
+sed "s/__GP_SERVERS__/$HOSTS/" "$SRC/gp-tunnel" > "$SRC/.gp-tunnel.tmp"
 install -o root -g wheel -m 0755 "$SRC/.gp-tunnel.tmp" /usr/local/sbin/gp-tunnel
 rm -f "$SRC/.gp-tunnel.tmp"
 

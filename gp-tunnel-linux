@@ -15,25 +15,42 @@
 # session: EOF on it means the SSH channel died, which is the only reliable
 # notice we get (a non-tty ssh session gets no SIGHUP when the client vanishes).
 #
-# One optional argument, exactly one of:
-#   foreground  (default) run the tunnel until killed
-#   background  daemonize openconnect and return
-#   stop        tear down a backgrounded tunnel (needs no stdin)
+# Optional arguments: gp-tunnel [MODE [GATEWAY]]
+#   MODE      foreground  (default) run the tunnel until killed
+#             background  daemonize openconnect and return
+#             stop        tear down a backgrounded tunnel (needs no stdin)
+#   GATEWAY   one of the hostnames baked into the allowlist below
+#             (default: the first one); ignored for stop
 set -euo pipefail
 
 OPENCONNECT="__OPENCONNECT__"                  # baked in by install-privileged-linux.sh
-SERVER="__GP_SERVER__"                         # baked in by install-privileged-linux.sh
+SERVERS="__GP_SERVERS__"   # allowlist baked in by install-privileged-linux.sh; first is default
 VPNC_SCRIPT="/usr/local/sbin/gp-vpnc-script"   # root-owned copy
 HIP="/usr/local/sbin/gp-hipreport.sh"
 PID_FILE="/run/gp-tunnel.pid"
 ROUTE_FILE="/run/gp-tunnel.route"
 
-[ $# -le 1 ] || { echo "gp-tunnel takes at most one argument" >&2; exit 64; }
+USAGE="usage: gp-tunnel [foreground|background|stop] [GATEWAY]"
+[ $# -le 2 ] || { echo "$USAGE" >&2; exit 64; }
 MODE="${1:-foreground}"
 case "$MODE" in
   foreground|background|stop) ;;
-  *) echo "usage: gp-tunnel [foreground|background|stop]" >&2; exit 64 ;;
+  *) echo "$USAGE" >&2; exit 64 ;;
 esac
+
+IFS=, read -r -a ALLOWED <<< "$SERVERS"
+SERVER=""
+if [ -z "${2:-}" ]; then
+  SERVER="${ALLOWED[0]}"
+else
+  for s in "${ALLOWED[@]}"; do
+    [ "$s" = "$2" ] && SERVER="$s"
+  done
+fi
+[ -n "$SERVER" ] || {
+  echo "gp-tunnel: '$2' is not an installed gateway (allowed: $SERVERS)" >&2
+  exit 64
+}
 
 # --- SSH route pinning ------------------------------------------------------
 # The gateway usually pushes a default route. Without this, the SSH connection

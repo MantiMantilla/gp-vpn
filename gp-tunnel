@@ -1,8 +1,13 @@
 #!/bin/bash
 # Root-owned GlobalProtect tunnel helper. Installed to /usr/local/sbin/gp-tunnel
 # and run via a scoped NOPASSWD sudoers rule. All privileged/exec-relevant values
-# are HARDCODED here (root-owned, not user-writable). The only inputs are the
-# username and cookie, read from stdin as data and passed to openconnect.
+# are HARDCODED here or baked in at install time (root-owned, not user-writable).
+# The only runtime inputs are the username and cookie, read from stdin as data,
+# and one optional argument:
+#
+#   gp-tunnel [GATEWAY]   connect; GATEWAY must be one of the hostnames baked
+#                         into the allowlist below (default: the first one)
+#   gp-tunnel stop        disconnect the tunnel this helper started
 #
 #   stdin line 1: GlobalProtect username
 #   stdin line 2: gateway prelogin-cookie
@@ -10,7 +15,55 @@ set -euo pipefail
 
 OPENCONNECT="/opt/homebrew/bin/openconnect"
 VPNC_SCRIPT="/usr/local/sbin/gp-vpnc-script"   # root-owned copy
-SERVER="__GP_SERVER__"   # baked in by install-privileged.sh at install time
+SERVERS="__GP_SERVERS__"   # allowlist baked in by install-privileged.sh; first is default
+PID_FILE="/var/run/gp-tunnel.pid"
+
+[ $# -le 1 ] || { echo "usage: gp-tunnel [GATEWAY|stop]" >&2; exit 64; }
+ARG="${1:-}"
+
+# --- stop -------------------------------------------------------------------
+if [ "$ARG" = stop ]; then
+  PID=""
+  [ -s "$PID_FILE" ] && PID=$(cat "$PID_FILE")
+  case "$PID" in *[!0-9]*) PID="" ;; esac
+  if [ -n "$PID" ] && case "$(ps -p "$PID" -o comm= 2>/dev/null)" in *openconnect) true ;; *) false ;; esac; then
+    # SIGINT is openconnect's clean disconnect: it logs out and runs the
+    # vpnc-script teardown, which restores the routes and DNS.
+    kill -INT "$PID"
+    for _ in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 1; done
+    if kill -0 "$PID" 2>/dev/null; then
+      echo "[!] openconnect (pid $PID) did not exit within 20s" >&2
+      exit 1
+    fi
+    echo "[*] Disconnected (openconnect pid $PID)."
+  else
+    echo "[i] No tunnel started by gp-tunnel is running."
+  fi
+  rm -f "$PID_FILE"
+  exit 0
+fi
+
+# --- connect ----------------------------------------------------------------
+IFS=, read -r -a ALLOWED <<< "$SERVERS"
+SERVER=""
+if [ -z "$ARG" ]; then
+  SERVER="${ALLOWED[0]}"
+else
+  for s in "${ALLOWED[@]}"; do
+    [ "$s" = "$ARG" ] && SERVER="$s"
+  done
+fi
+[ -n "$SERVER" ] || {
+  echo "gp-tunnel: '$ARG' is not an installed gateway (allowed: $SERVERS)" >&2
+  exit 64
+}
+
+# Two tunnels fighting over the default route helps nobody.
+if pgrep -x openconnect >/dev/null 2>&1; then
+  echo "[!] openconnect is already running; refusing to stack a second tunnel." >&2
+  echo "    Disconnect it first: sudo -n /usr/local/sbin/gp-tunnel stop" >&2
+  exit 75
+fi
 
 read -r GP_USER || true
 read -r GP_COOKIE || true
@@ -23,10 +76,15 @@ SCRIPT_ARG=()
 HIP="/usr/local/sbin/gp-hipreport.sh"
 [ -x "$HIP" ] && SCRIPT_ARG+=(--csd-wrapper="$HIP")
 
-printf '%s\n' "$GP_COOKIE" | exec "$OPENCONNECT" \
+echo "[*] Connecting to $SERVER..."
+# exec (not in a pipeline, which would run it in a subshell) keeps this pid,
+# so it is openconnect's pid for `gp-tunnel stop`. The cookie goes in over
+# /dev/fd, never a temp file.
+echo $$ > "$PID_FILE"
+exec "$OPENCONNECT" \
   --protocol=gp \
   --user="$GP_USER" \
   --usergroup=gateway:prelogin-cookie \
   --passwd-on-stdin \
-  "${SCRIPT_ARG[@]}" \
-  "$SERVER"
+  ${SCRIPT_ARG[@]+"${SCRIPT_ARG[@]}"} \
+  "$SERVER" < <(printf '%s\n' "$GP_COOKIE")

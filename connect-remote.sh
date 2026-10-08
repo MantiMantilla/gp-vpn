@@ -7,9 +7,13 @@
 # remote disk and never appears in an argv / `ps` listing on either side.
 #
 # Usage:
-#   GP_SERVER=vpn.example.com ./connect-remote.sh [options] user@linux-host
+#   GP_SERVERS="prod=vpn.example.com,fallback=vpn-fallback.example.com" \
+#     ./connect-remote.sh [options] user@linux-host
+#   (or GP_SERVER=vpn.example.com for a single gateway)
 #
 # Options:
+#   -s, --server NAME  gateway to connect to: a name or hostname from
+#                  GP_SERVERS (default: the first one)
 #   --install      copy the helper files to the host and run the one-time
 #                  privileged installer there (asks for the remote sudo
 #                  password once), then exit
@@ -30,12 +34,15 @@ HELPER=/usr/local/sbin/gp-tunnel
 ACTION=connect
 MODE=foreground
 TARGET=""
+GATEWAY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --install)            ACTION=install ;;
     --stop)               ACTION=stop ;;
     --background|--detach) MODE=background ;;
-    -h|--help)            sed -n '2,25p' "$0"; exit 0 ;;
+    -s|--server)          [ $# -ge 2 ] || { echo "[!] $1 needs a gateway name" >&2; exit 64; }
+                          GATEWAY="$2"; shift ;;
+    -h|--help)            sed -n '2,29p' "$0"; exit 0 ;;
     -*)  echo "[!] unknown option: $1 (pass ssh flags via GP_SSH_OPTS)" >&2; exit 64 ;;
     *)   [ -z "$TARGET" ] || { echo "[!] more than one ssh target given" >&2; exit 64; }
          TARGET="$1" ;;
@@ -44,10 +51,9 @@ while [ $# -gt 0 ]; do
 done
 : "${TARGET:?Give an ssh target, e.g. ./connect-remote.sh user@linux-host}"
 
-SERVER="${GP_SERVER:?Set GP_SERVER to your VPN gateway hostname, e.g. vpn.example.com}"
-case "$SERVER" in
-  *[!A-Za-z0-9.-]*) echo "[!] GP_SERVER must be a bare hostname" >&2; exit 1 ;;
-esac
+# shellcheck source=gp-servers.sh
+. "$DIR/gp-servers.sh"
+SERVER=$(gp_resolve_server "$GATEWAY")
 
 SSH_OPTS=()
 [ -n "${GP_SSH_OPTS:-}" ] && read -r -a SSH_OPTS <<< "$GP_SSH_OPTS"
@@ -55,16 +61,18 @@ ssh_run() { ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$TARGET" "$@"; }
 
 # --- one-time install -------------------------------------------------------
 if [ "$ACTION" = install ]; then
+  # Bare hostnames joined by commas: validated, and safe in the ssh command line.
+  HOSTS=$(gp_server_hosts)
   echo "[*] Copying helper files to $TARGET..."
   RTMP=$(ssh_run 'mktemp -d /tmp/gp-vpn.XXXXXXXX')
   # gp-vpnc-script is deliberately not shipped: it is the macOS-patched copy.
   # The remote installer picks up the distro's own vpnc-script instead.
-  tar -cf - -C "$DIR" gp-tunnel-linux install-privileged-linux.sh gp-hipreport.sh \
+  tar -cf - -C "$DIR" gp-tunnel-linux install-privileged-linux.sh gp-hipreport.sh gp-servers.sh \
     | ssh_run "tar -xf - -C $RTMP"
   echo "[*] Running the one-time privileged installer (remote sudo password may be needed)..."
   ssh -t ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$TARGET" \
-    "cd $RTMP && sudo GP_SERVER=$SERVER bash ./install-privileged-linux.sh; rm -rf $RTMP"
-  echo "[✓] $TARGET is ready. Connect with: GP_SERVER=$SERVER $0 $TARGET"
+    "cd $RTMP && sudo GP_SERVERS=$HOSTS bash ./install-privileged-linux.sh; rm -rf $RTMP"
+  echo "[✓] $TARGET is ready. Connect with: $0 [--server NAME] $TARGET"
   exit 0
 fi
 
@@ -79,19 +87,25 @@ fi
 # short-lived cookie on it — and reports the address the host sees us at.
 PROBE='[ -x HELPER ] && sudo -n -l HELPER >/dev/null 2>&1 || exit 0
 if pgrep -x openconnect >/dev/null 2>&1; then s=busy; else s=free; fi
-printf "ready %s %s\n" "${SSH_CLIENT%% *}" "$s"'
+if grep -q "^SERVERS=" HELPER 2>/dev/null; then v=multi; else v=old; fi
+printf "ready %s %s %s\n" "${SSH_CLIENT%% *}" "$s" "$v"'
 PREFLIGHT=$(ssh_run "/bin/sh -c '${PROBE//HELPER/$HELPER}'" 2>/dev/null || true)
 # shellcheck disable=SC2086
 set -- $PREFLIGHT
 if [ "${1:-}" != ready ]; then
   echo "[!] $TARGET has no passwordless gp-tunnel helper installed." >&2
-  echo "    Run once:  GP_SERVER=$SERVER $0 --install $TARGET" >&2
+  echo "    Run once:  $0 --install $TARGET" >&2
+  exit 1
+fi
+if [ "${4:-}" != multi ]; then
+  echo "[!] The gp-tunnel helper on $TARGET predates gateway switching." >&2
+  echo "    Reinstall it once:  $0 --install $TARGET" >&2
   exit 1
 fi
 PEER="${2:-}"
 if [ "${3:-}" = busy ]; then
   echo "[!] $TARGET already has a tunnel up; not capturing a second cookie." >&2
-  echo "    Tear it down first:  GP_SERVER=$SERVER $0 --stop $TARGET" >&2
+  echo "    Tear it down first:  $0 --stop $TARGET" >&2
   exit 1
 fi
 [ "${GP_PIN_SSH_ROUTE:-1}" = 0 ] && PEER=""
@@ -122,10 +136,10 @@ if [ -z "${COOKIE:-}" ]; then
   exit 1
 fi
 
-echo "[*] Cookie OK for $USER_ID. Bringing up the tunnel on $TARGET ($MODE)..."
+echo "[*] Cookie OK for $USER_ID. Bringing up the tunnel to $SERVER on $TARGET ($MODE)..."
 # Opened read-write so this never blocks waiting for ssh to become the reader;
 # fd 9 is only ever written to, and closing it at exit is what gives the remote
 # helper its EOF.
 exec 9<>"$FIFO"
 printf '%s\n%s\n%s\n' "$USER_ID" "$COOKIE" "$PEER" >&9
-ssh_run "sudo -n $HELPER $MODE" <"$FIFO"
+ssh_run "sudo -n $HELPER $MODE $SERVER" <"$FIFO"
