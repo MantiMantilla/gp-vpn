@@ -443,8 +443,10 @@ else # use route command
 		# route(s) match the VPN gateway, so we simply find a default
 		# route and use its gateway.
 		case "$VPNGATEWAY" in
-		*:*)	route add $route_syntax_inet6_host "$VPNGATEWAY" $route_syntax_gw "`get_ipv6_default_gw`";;
-		*)	route add -host "$VPNGATEWAY" $route_syntax_gw "`get_default_gw`";;
+		*:*)	route $route_syntax_del $route_syntax_inet6_host "$VPNGATEWAY" >/dev/null 2>&1
+			route add $route_syntax_inet6_host "$VPNGATEWAY" $route_syntax_gw "`get_ipv6_default_gw`";;
+		*)	route $route_syntax_del -host "$VPNGATEWAY" >/dev/null 2>&1
+			route add -host "$VPNGATEWAY" $route_syntax_gw "`get_default_gw`";;
 		esac
 	}
 
@@ -647,7 +649,19 @@ search $DOMAINS"
 			# 10.4 and later require use of scutil for DNS to work properly
 			*)
 				OVERRIDE_PRIMARY=""
-				if [ -n "$CISCO_SPLIT_INC" ]; then
+				# GlobalProtect pushes full tunnel as a split-include of
+				# 0.0.0.0/0. Treat that as "no split routing": otherwise the
+				# tunnel never becomes the primary service, and every
+				# non-matched DNS query goes to the LAN's resolvers, which
+				# are now routed into the tunnel and only answer by luck.
+				FULL_TUNNEL=""
+				i=0
+				while [ $i -lt ${CISCO_SPLIT_INC:-0} ]; do
+					eval NETWORK="\${CISCO_SPLIT_INC_${i}_ADDR}"
+					[ "$NETWORK" = "0.0.0.0" ] && FULL_TUNNEL=1
+					i=`expr $i + 1`
+				done
+				if [ -n "$CISCO_SPLIT_INC" ] && [ -z "$FULL_TUNNEL" ]; then
 					if [ $CISCO_SPLIT_INC -lt 1 ]; then
 						# Must override for correct default route
 						# Cannot use multiple DNS matching in this case
