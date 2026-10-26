@@ -138,6 +138,10 @@ def main():
         browser = p.chromium.launch(channel="chrome", headless=not HEADED,
                                     args=["--no-first-run", "--no-default-browser-check"])
         ctx = browser.new_context()
+        # Okta Verify (FastPass) is reached via a loopback server on this Mac.
+        # Headless Chrome can't show the Local Network Access prompt, so grant
+        # it up front or apps that require Okta Verify stall at "Open Okta Verify".
+        ctx.grant_permissions(["local-network-access"])
         try:
             ctx.add_cookies(cookies)
         except Exception as e:
