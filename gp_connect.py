@@ -54,7 +54,11 @@ def wanted(host):
 def get_saml_request(server):
     url = f"https://{server}{PRELOGIN_PATH}?tmp=tmp&clientVer=4100&clientos={CLIENT_OS}"
     req = urllib.request.Request(url, data=b"", headers={"User-Agent": "PAN GlobalProtect"})
-    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=20) as r:
+    ctx = ssl.create_default_context()
+    # Some gateways don't support RFC 5746 secure renegotiation, which OpenSSL 3
+    # refuses by default. Certificates are still verified. (Constant is 3.12+.)
+    ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+    with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
         body = r.read().decode("utf-8", "replace")
     m = re.search(r"<saml-request>(.*?)</saml-request>", body, re.S)
     if not m:
