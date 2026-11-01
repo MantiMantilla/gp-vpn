@@ -124,6 +124,7 @@ mkfifo -m 600 "$FIFO"
 trap 'rm -rf "$FIFO_DIR"; rm -f "$DIR/auth.json"' EXIT INT TERM HUP
 cd "$DIR"
 
+gp_clear_stale_gateway_routes "$SERVER"
 echo "[*] Capturing GlobalProtect gateway cookie via your Chrome Okta session..."
 # clientos must match the machine that redeems the cookie, not this Mac.
 uv run gp_connect.py "$SERVER" --gateway --client-os=Linux

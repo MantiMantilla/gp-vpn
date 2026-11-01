@@ -451,9 +451,13 @@ else # use route command
 	}
 
 	del_vpngateway_route() {
+		# Delete by destination only. If the network changed while
+		# connected, the default gateway no longer matches the one this
+		# route was added with, and a gateway-qualified delete would leave
+		# a host route to the VPN gateway via a router that is gone.
 		case "$VPNGATEWAY" in
-		*:*)	route $route_syntax_del $route_syntax_inet6_host "$VPNGATEWAY" $route_syntax_gw "`get_ipv6_default_gw`";;
-		*)	route $route_syntax_del -host "$VPNGATEWAY" $route_syntax_gw "`get_default_gw`";;
+		*:*)	route $route_syntax_del $route_syntax_inet6_host "$VPNGATEWAY";;
+		*)	route $route_syntax_del -host "$VPNGATEWAY";;
 		esac
 	}
 

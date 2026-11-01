@@ -78,6 +78,14 @@ down, so a failed capture leaves you connected where you were.
 Disconnect with Ctrl+C, or `--stop` (which needs no password with the helper
 installed).
 
+A tunnel pins a host route to its gateway through your LAN router. If
+openconnect dies without tearing down (sleep, crash, `kill -9`) or you change
+networks while connected, that route can outlive the tunnel and point at a
+router that is no longer there, which makes even the cookie capture fail with
+`Can't assign requested address`. Before capturing, `connect.sh` and
+`connect-remote.sh` detect such a leftover and remove it (via the helper's
+`unroute`, or `sudo` if the helper predates it).
+
 ## Remote Linux hosts
 
 To put a Linux server on the VPN using the Okta session in *your* Chrome, run
@@ -132,7 +140,9 @@ a second openconnect over the first.
 - The privileged helper only ever takes a username and a short-lived SAML
   cookie on stdin; all `openconnect` flags are hardcoded in the root-owned
   copy, and the gateway can only be chosen from the allowlist baked in at
-  install time, not user-controllable beyond that. The Linux helper
+  install time, not user-controllable beyond that. Its `unroute` mode only
+  deletes host routes to an allowlisted gateway, and only while no tunnel is
+  up. The Linux helper
   additionally accepts one literal mode word (`foreground`/`background`/`stop`)
   and validates the pinned SSH address as a bare IP literal before it reaches
   `ip route`.

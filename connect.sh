@@ -71,6 +71,7 @@ fi
 trap 'rm -f "$DIR/auth.json"' EXIT INT TERM HUP
 cd "$DIR"
 
+gp_clear_stale_gateway_routes "$SERVER"
 echo "[*] Capturing GlobalProtect gateway cookie for $SERVER via your Chrome Okta session..."
 uv run gp_connect.py "$SERVER" --gateway
 

@@ -8,6 +8,9 @@
 #   gp-tunnel [GATEWAY]   connect; GATEWAY must be one of the hostnames baked
 #                         into the allowlist below (default: the first one)
 #   gp-tunnel stop        disconnect the tunnel this helper started
+#   gp-tunnel unroute [GATEWAY]
+#                         remove a host route to GATEWAY left behind by an
+#                         earlier tunnel (refused while a tunnel is up)
 #
 #   stdin line 1: GlobalProtect username
 #   stdin line 2: gateway prelogin-cookie
@@ -18,8 +21,23 @@ VPNC_SCRIPT="/usr/local/sbin/gp-vpnc-script"   # root-owned copy
 SERVERS="__GP_SERVERS__"   # allowlist baked in by install-privileged.sh; first is default
 PID_FILE="/var/run/gp-tunnel.pid"
 
-[ $# -le 1 ] || { echo "usage: gp-tunnel [GATEWAY|stop]" >&2; exit 64; }
+case "$#:${1:-}" in
+  0:|1:*|2:unroute) ;;
+  *) echo "usage: gp-tunnel [GATEWAY|stop|unroute [GATEWAY]]" >&2; exit 64 ;;
+esac
 ARG="${1:-}"
+
+IFS=, read -r -a ALLOWED <<< "$SERVERS"
+# The allowlisted hostname equal to $1, or the default one when $1 is empty.
+pick_server() {
+  local s
+  if [ -z "$1" ]; then printf '%s\n' "${ALLOWED[0]}"; return 0; fi
+  for s in "${ALLOWED[@]}"; do
+    if [ "$s" = "$1" ]; then printf '%s\n' "$s"; return 0; fi
+  done
+  echo "gp-tunnel: '$1' is not an installed gateway (allowed: $SERVERS)" >&2
+  return 64
+}
 
 # --- stop -------------------------------------------------------------------
 if [ "$ARG" = stop ]; then
@@ -43,20 +61,27 @@ if [ "$ARG" = stop ]; then
   exit 0
 fi
 
-# --- connect ----------------------------------------------------------------
-IFS=, read -r -a ALLOWED <<< "$SERVERS"
-SERVER=""
-if [ -z "$ARG" ]; then
-  SERVER="${ALLOWED[0]}"
-else
-  for s in "${ALLOWED[@]}"; do
-    [ "$s" = "$ARG" ] && SERVER="$s"
+# --- unroute ----------------------------------------------------------------
+# A tunnel pins a host route to its gateway via the LAN router. One left behind
+# (openconnect killed, or the network changed mid-session) points at a router
+# that is gone, so the gateway is unreachable before a new tunnel can replace
+# it. With no tunnel up, any host route to an allowlisted gateway is such a
+# leftover.
+if [ "$ARG" = unroute ]; then
+  SERVER=$(pick_server "${2:-}") || exit 64
+  if pgrep -x openconnect >/dev/null 2>&1; then
+    echo "[!] openconnect is running; leaving its gateway route alone." >&2
+    exit 75
+  fi
+  for ip in $(dscacheutil -q host -a name "$SERVER" | awk '/^ip_address:/ {print $2}'); do
+    case "$ip" in ''|*[!0-9.]*) continue ;; esac
+    route -n delete -host "$ip" >/dev/null 2>&1 && echo "[*] Removed stale route to $SERVER ($ip)."
   done
+  exit 0
 fi
-[ -n "$SERVER" ] || {
-  echo "gp-tunnel: '$ARG' is not an installed gateway (allowed: $SERVERS)" >&2
-  exit 64
-}
+
+# --- connect ----------------------------------------------------------------
+SERVER=$(pick_server "$ARG") || exit 64
 
 # Two tunnels fighting over the default route helps nobody.
 if pgrep -x openconnect >/dev/null 2>&1; then
